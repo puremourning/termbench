@@ -1,0 +1,17 @@
+{
+  "$schema": "https://puremourning.github.io/vimspector/schema/vimspector.schema.json",
+  "configurations": {
+    "Run": {
+      "adapter": "CodeLLDB",
+      "variables": {
+        "MAKE": {
+          "shell": "./build.sh"
+        }
+      },
+      "configuration": {
+        "request": "launch",
+        "program": "${workspaceRoot}/termbench_debug_clang"
+      }
+    }
+  }
+}

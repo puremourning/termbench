@@ -83,11 +83,61 @@ static void AppendStat(buffer *Buffer, char const *Name, int Value, char const *
 #define MAX_TERM_HEIGHT 4096
 static char TerminalBuffer[256+16*MAX_TERM_WIDTH*MAX_TERM_HEIGHT];
 
-#include <windows.h>
-#include <intrin.h>
+#if defined(_WIN64) || defined(_WIN32)
+#define ISWINDOWS
+#endif
 
+
+#ifdef ISWINDOWS
+    #include <windows.h>
+    #include <intrin.h>
+
+    #define DO_WRITE( Terminal, Data, Count ) \
+         WriteConsoleA(Terminal, Data, Count, 0, 0)
+#else
+    #include <sys/types.h>
+    #include <sys/ioctl.h>
+    #include <sys/select.h>
+    #include <unistd.h>
+    #include <termios.h>
+    #include <poll.h>
+    #include <time.h>
+
+    #define DO_WRITE( Terminal, Data, Count ) \
+         write(Terminal, Data, Count )
+
+    static int GetMS( timespec Start, timespec End )
+    {
+      timespec delta;
+      if ( End.tv_nsec - Start.tv_nsec < 0 ) {
+        delta.tv_sec = End.tv_sec - Start.tv_sec - 1 ;
+        delta.tv_nsec = 1000000000 + End.tv_sec - Start.tv_nsec;
+      } else {
+        delta.tv_sec = End.tv_sec - Start.tv_sec;
+        delta.tv_nsec = End.tv_nsec - Start.tv_nsec;
+      }
+
+      return int( delta.tv_sec * 1000.0 + delta.tv_nsec / ( 1000.0 * 1000.0 ) );
+    }
+
+    timespec QueryMonotonicClock()
+    {
+      timespec t = {};
+      clock_gettime( CLOCK_MONOTONIC_RAW, &t );
+      return t;
+    }
+
+#endif
+
+
+#ifdef ISWINDOWS
 extern "C" void mainCRTStartup(void)
 {
+#else
+int main()
+{
+#endif
+#ifdef ISWINDOWS
     char CPU[65] = {};
     for(int SegmentIndex = 0;
         SegmentIndex < 3;
@@ -95,6 +145,7 @@ extern "C" void mainCRTStartup(void)
     {
         __cpuid((int *)(CPU + 16*SegmentIndex), 0x80000002 + SegmentIndex);
     }
+#endif
     
     for(int Num = 0; Num < 256; ++Num)
     {
@@ -103,6 +154,11 @@ extern "C" void mainCRTStartup(void)
         AppendChar(&NumBuf, 0);
     }
     
+#ifdef ISWINDOWS
+    #define TIMEPOINT( Name ) \
+        LARGE_INTEGER Name; \
+        QueryPerformanceCounter( & Name )
+
     HANDLE TerminalIn = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE TerminalOut = GetStdHandle(STD_OUTPUT_HANDLE);
     
@@ -114,6 +170,28 @@ extern "C" void mainCRTStartup(void)
     
     LARGE_INTEGER Freq;
     QueryPerformanceFrequency(&Freq);
+#else
+    #define TIMEPOINT( Name ) auto Name = QueryMonotonicClock()
+    // Put the terminal in raw mode to handle input
+    termios orig_termios;
+    tcgetattr( STDIN_FILENO, &orig_termios );
+    termios raw = orig_termios;
+
+    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_oflag &= ~(OPOST);
+    raw.c_cflag |= (CS8);
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+
+    tcsetattr( STDIN_FILENO, TCSAFLUSH, &raw );
+
+    pollfd poll_in = {};
+    poll_in.fd = STDIN_FILENO;
+    poll_in.events = POLLIN;
+    poll_in.revents = POLLIN;
+
+    auto TerminalIn = STDIN_FILENO;
+    auto TerminalOut = STDOUT_FILENO;
+#endif
     
     int PrepMS = 0;
     int WriteMS = 0;
@@ -134,15 +212,18 @@ extern "C" void mainCRTStartup(void)
     int TermMark = 0;
     int StatPercent = 0;
     
-    LARGE_INTEGER AverageMark = {};
     int long long TermMarkAccum = 0;
+#ifdef ISWINDOWS
+    LARGE_INTEGER AverageMark = {};
+#else
+    timespec AverageMark = {};
+#endif
     
     while(Running)
     {
         int NextByteCount = 0;
         
-        LARGE_INTEGER A;
-        QueryPerformanceCounter(&A);
+        TIMEPOINT(A);
         
         if(TermMarkAccum == 0)
         {
@@ -150,7 +231,11 @@ extern "C" void mainCRTStartup(void)
         }
         else
         {
+#ifdef ISWINDOWS
             int long long AvgMS = 1000*(A.QuadPart - AverageMark.QuadPart) / Freq.QuadPart;
+#else
+            auto AvgMS = GetMS( AverageMark, A );
+#endif
             int long long StatMS = 10000;
             if(AvgMS > StatMS)
             {
@@ -164,11 +249,19 @@ extern "C" void mainCRTStartup(void)
         
         if(!DimIsKnown)
         {
+#ifdef ISWINDOWS
             CONSOLE_SCREEN_BUFFER_INFO ConsoleInfo;
             GetConsoleScreenBufferInfo(TerminalOut, &ConsoleInfo);
             Width = ConsoleInfo.srWindow.Right - ConsoleInfo.srWindow.Left;
             Height = ConsoleInfo.srWindow.Bottom - ConsoleInfo.srWindow.Top;
             DimIsKnown = true;
+#else
+            winsize sz;
+            ioctl(STDOUT_FILENO, TIOCGWINSZ, &sz);
+            Width = sz.ws_col;
+            Height = sz.ws_row;
+            DimIsKnown = true;
+#endif
         }
         
         if(Width > MAX_TERM_WIDTH) Width = MAX_TERM_WIDTH;
@@ -202,7 +295,7 @@ extern "C" void mainCRTStartup(void)
             if(WritePerLine)
             {
                 NextByteCount += Frame.Count;
-                WriteConsoleA(TerminalOut, Frame.Data, Frame.Count, 0, 0);
+                DO_WRITE(TerminalOut, Frame.Data, Frame.Count);
                 Frame.Count = 0;
             }
         }
@@ -220,8 +313,13 @@ extern "C" void mainCRTStartup(void)
         AppendStat(&Frame, "Total", TotalMS, "ms");
         
         AppendGoto(&Frame, 1, 2);
+#ifdef ISWINDOWS
         AppendString(&Frame, WritePerLine ? "[F1]:write per line " : "[F1]:write per frame ");
         AppendString(&Frame, ColorPerFrame ? "[F2]:color per frame " : "[F2]:color per char ");
+#else
+        AppendString(&Frame, WritePerLine ? "[L]:write per line " : "[L]:write per frame ");
+        AppendString(&Frame, ColorPerFrame ? "[C]:color per frame " : "[C]:color per char ");
+#endif
         
         if(!WritePerLine)
         {
@@ -229,10 +327,14 @@ extern "C" void mainCRTStartup(void)
             if(TermMark)
             {
                 AppendStat(&Frame, VERSION_NAME, TermMark, ColorPerFrame ? "kg/s" : "kcg/s");
+#ifdef ISWINDOWS
                 AppendString(&Frame, "(");
                 AppendString(&Frame, CPU);
                 AppendString(&Frame, " Win32 ");
                 AppendString(&Frame, VirtualTerminalSupport ? "VTS)" : "NO VTS REPORTED)");
+#else
+                AppendString(&Frame, "(POSIX)");
+#endif
             }
             else
             {
@@ -240,16 +342,15 @@ extern "C" void mainCRTStartup(void)
             }
         }
         
-        LARGE_INTEGER B;
-        QueryPerformanceCounter(&B);
+        TIMEPOINT( B );
         
         NextByteCount += Frame.Count;
-        WriteConsoleA(TerminalOut, Frame.Data, Frame.Count, 0, 0);
+        DO_WRITE(TerminalOut, Frame.Data, Frame.Count);
         
-        LARGE_INTEGER C;
-        QueryPerformanceCounter(&C);
+        TIMEPOINT( C );
 
         int ResetStats = false;
+#ifdef ISWINDOWS
         while(WaitForSingleObject(TerminalIn, 0) == WAIT_OBJECT_0)
         {
             INPUT_RECORD Record;
@@ -284,14 +385,56 @@ extern "C" void mainCRTStartup(void)
                 }
             }
         }
+#else
+        while ( true )
+        {
+            auto s = poll( &poll_in, 1, 0 );
+            if ( s < 0 )
+            {
+                return -1;
+            }
+            else if ( s == 0 )
+            {
+                break;
+            }
+            else
+            {
+                char ch = '\0';
+                if ( read( STDIN_FILENO, &ch, 1 ) < 1 || ch == 'q' )
+                {
+                    Running = false;
+                    break;
+                }
+                // CBA to parse term codes for f-keys and stuff
+                else if ( ch == 'L' )
+                {
+                    WritePerLine = !WritePerLine;
+                    ResetStats = true;
+                }
+                else if ( ch == 'C' )
+                {
+                    ColorPerFrame = !ColorPerFrame;
+                    ResetStats = true;
+                }
+            }
+
+            // TODO : detecting terminal resize on posix
+        }
+#endif
         
-        LARGE_INTEGER D;
-        QueryPerformanceCounter(&D);
+        TIMEPOINT( D );
         
+#ifdef ISWINDOWS
         PrepMS = GetMS(A.QuadPart, B.QuadPart, Freq.QuadPart);
         WriteMS = GetMS(B.QuadPart, C.QuadPart, Freq.QuadPart);
         ReadMS = GetMS(C.QuadPart, D.QuadPart, Freq.QuadPart);
         TotalMS = GetMS(A.QuadPart, D.QuadPart, Freq.QuadPart);
+#else
+        PrepMS = GetMS(A, B);
+        WriteMS = GetMS(B, C);
+        ReadMS = GetMS(C,D);
+        TotalMS = GetMS(A,D);
+#endif
         ByteCount = NextByteCount;
         ++FrameIndex;
         
@@ -304,11 +447,17 @@ extern "C" void mainCRTStartup(void)
             TermMarkAccum += Width*Height;
         }
     }
+
+#ifndef ISWINDOWS
+    tcsetattr( STDIN_FILENO, TCSAFLUSH, &orig_termios );
+#endif
 }
 
 //
 // NOTE(casey): Support definitions for CRT-less Visual Studio and CLANG
 //
+
+#ifdef ISWINDOWS
 
 #ifndef __clang__
 #undef function
@@ -333,3 +482,5 @@ extern "C" void *memcpy(void *DestInit, void const *SourceInit, size_t Size)
     
     return(DestInit);
 }
+
+#endif
