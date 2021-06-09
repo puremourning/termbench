@@ -218,6 +218,9 @@ int main()
 #else
     timespec AverageMark = {};
 #endif
+
+    // clear the screen
+    DO_WRITE(TerminalOut, "\x1b[2J", 4);
     
     while(Running)
     {
@@ -266,13 +269,15 @@ int main()
         
         if(Width > MAX_TERM_WIDTH) Width = MAX_TERM_WIDTH;
         if(Height > MAX_TERM_HEIGHT) Height = MAX_TERM_HEIGHT;
+
+        auto DrawHeight = Height - 3;
         
         buffer Frame = {sizeof(TerminalBuffer), 0, TerminalBuffer};
-        
-        for(int Y = 0; Y <= Height; ++Y)
+
+        for(int Y = 3; Y <= Height; ++Y)
         {
             AppendGoto(&Frame, 1, 1 + Y);
-            for(int X = 0; X <= Width; ++X)
+            for(int X = 0; X < Width; ++X)
             {
                 if(!ColorPerFrame)
                 {
@@ -303,7 +308,7 @@ int main()
         AppendColor(&Frame, false, 0, 0, 0);
         AppendColor(&Frame, true, 255, 255, 255);
         AppendGoto(&Frame, 1, 1);
-        AppendStat(&Frame, "Glyphs", (Width*Height) / 1024, "k");
+        AppendStat(&Frame, "Glyphs", (Width*DrawHeight) / 1024, "k");
         AppendStat(&Frame, "Bytes", ByteCount / 1024, "kb");
         AppendStat(&Frame, "Frame", FrameIndex);
 
@@ -444,7 +449,7 @@ int main()
         }
         else
         {
-            TermMarkAccum += Width*Height;
+            TermMarkAccum += Width*DrawHeight;
         }
     }
 
